@@ -1,0 +1,624 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, collection, query, getDocs, setLogLevel } from 'firebase/firestore';
+
+// Set Firebase log level to Debug for development visibility (optional)
+setLogLevel('debug');
+
+// --- 1. Global Variables & Configuration ---
+// These are provided by the canvas environment
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Placeholder product data (used to initialize the database if empty)
+const SAMPLE_PRODUCTS = [
+  { id: 'p1', name: 'Luxury Smartwatch 4', price: 299.99, description: 'Premium titanium watch with advanced health tracking.', imageUrl: 'https://placehold.co/400x400/2563EB/ffffff?text=Tech%20Watch', stock: 15, category: 'Electronics' },
+  { id: 'p2', name: 'Studio Noise-Cancelling Headphones', price: 179.50, description: 'Immersive audio experience with industry-leading noise cancellation.', imageUrl: 'https://placehold.co/400x400/D97706/ffffff?text=Audio', stock: 8, category: 'Electronics' },
+  { id: 'p3', name: 'Ergonomic Mechanical Keyboard', price: 125.00, description: 'Tactile switches and ergonomic design for superior typing comfort.', imageUrl: 'https://placehold.co/400x400/10B981/ffffff?text=Keyboard', stock: 22, category: 'Electronics' },
+  { id: 'p4', name: 'Artisan Coffee Blend (1kg)', price: 22.99, description: 'A rich, dark-roast blend sourced from ethical farms.', imageUrl: 'https://placehold.co/400x400/543310/ffffff?text=Coffee', stock: 50, category: 'Food & Drink' },
+  { id: 'p5', name: 'Organic Green Tea Set', price: 35.00, description: 'Premium loose leaf green tea with a ceramic infuser.', imageUrl: 'https://placehold.co/400x400/4CAF50/ffffff?text=Tea+Set', stock: 30, category: 'Food & Drink' },
+  { id: 'p6', name: 'Classic Leather Wallet', price: 55.00, description: 'Hand-stitched full-grain leather wallet with RFID protection.', imageUrl: 'https://placehold.co/400x400/795548/ffffff?text=Wallet', stock: 40, category: 'Apparel' },
+  { id: 'p7', name: 'Performance Running Shoes', price: 110.00, description: 'Lightweight and responsive shoes designed for speed and comfort.', imageUrl: 'https://placehold.co/400x400/E91E63/ffffff?text=Shoes', stock: 18, category: 'Apparel' },
+  { id: 'p8', name: 'Digital Art Tablet', price: 399.00, description: 'High-resolution drawing tablet with pressure-sensitive stylus.', imageUrl: 'https://placehold.co/400x400/9C27B0/ffffff?text=Tablet', stock: 12, category: 'Electronics' },
+  { id: 'p9', name: 'Stainless Steel Water Bottle (1L)', price: 19.95, description: 'Keeps drinks cold for 24 hours and hot for 12 hours.', imageUrl: 'https://placehold.co/400x400/607D8B/ffffff?text=Bottle', stock: 65, category: 'Homeware' },
+  { id: 'p10', name: 'Modern Desk Lamp', price: 75.99, description: 'Minimalist design with adjustable brightness and color temperature.', imageUrl: 'https://placehold.co/400x400/FFC107/333333?text=Lamp', stock: 20, category: 'Homeware' },
+];
+
+const ALL_CATEGORIES = ['All', 'Electronics', 'Apparel', 'Food & Drink', 'Homeware'];
+
+// Firestore Collection Paths
+const COLLECTION_PATHS = {
+  products: `/artifacts/${appId}/public/data/products`,
+  carts: (userId) => `/artifacts/${appId}/users/${userId}/carts`,
+  // Must initialize app here since it's used outside of the component context
+  cartDocument: (userId) => doc(getFirestore(initializeApp(firebaseConfig)), COLLECTION_PATHS.carts(userId), 'userCart'),
+};
+
+
+// --- 2. Helper Components ---
+
+/** Icon for Shopping Cart */
+const CartIcon = ({ itemCount }) => (
+  <div className="relative">
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
+    </svg>
+    {itemCount > 0 && (
+      <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center p-1">
+        {itemCount}
+      </span>
+    )}
+  </div>
+);
+
+/** Icon for back button (Chevron Left) */
+const BackIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+    </svg>
+);
+
+
+const Header = ({ totalCartItems, openCart, userId, navigateTo, isDetailsView, openAuthModal, handleLogout }) => (
+  <header className="bg-white shadow-md sticky top-0 z-10">
+    <div className="max-w-4xl mx-auto p-4 flex items-center justify-between">
+      <div className="flex items-center space-x-4">
+        {isDetailsView ? (
+          <button onClick={() => navigateTo('list')} className="flex items-center text-gray-700 hover:text-blue-600 transition duration-150">
+              <BackIcon />
+              <span className='ml-1 text-lg font-semibold hidden sm:inline'>Back to Products</span>
+          </button>
+        ) : (
+          <h1 className="text-2xl font-extrabold text-blue-600">
+            Eshop
+          </h1>
+        )}
+      </div>
+
+      <div className="flex items-center space-x-4">
+        {userId ? (
+          <button
+            onClick={handleLogout}
+            className="py-1 px-3 text-sm font-medium rounded-lg text-red-600 border border-red-600 hover:bg-red-50 transition duration-150 hidden sm:block"
+          >
+            Logout
+          </button>
+        ) : (
+          <button
+            onClick={openAuthModal}
+            className="py-1 px-3 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition duration-150"
+          >
+            Login / Register
+          </button>
+        )}
+        <button
+          onClick={openCart}
+          className="p-2 rounded-lg text-gray-700 hover:bg-blue-50 transition duration-150"
+          aria-label="View shopping cart"
+        >
+          <CartIcon itemCount={totalCartItems} />
+        </button>
+      </div>
+    </div>
+    <div className="bg-gray-100 text-xs text-gray-600 p-1 text-center truncate">
+        User ID: <span className="font-mono text-gray-800">{userId || "Not Authenticated"}</span>
+    </div>
+  </header>
+);
+
+const ProductCard = ({ product, onViewDetails, onAddToCart }) => (
+  <div className="bg-white rounded-xl shadow-lg overflow-hidden flex flex-col transition duration-300 hover:shadow-xl transform hover:-translate-y-0.5">
+    <img
+      src={product.imageUrl}
+      alt={product.name}
+      className="w-full h-48 object-cover object-center"
+      onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/400x400/94A3B8/ffffff?text=Image+Missing" }}
+    />
+    <div className="p-4 flex flex-col flex-grow">
+      <span className="text-xs font-semibold text-blue-500 mb-1 uppercase">{product.category}</span>
+      <h2 className="text-lg font-bold text-gray-800 mb-1 line-clamp-2">{product.name}</h2>
+      <p className="text-2xl font-extrabold text-blue-600 mt-auto mb-2">${product.price.toFixed(2)}</p>
+      <div className="flex justify-between space-x-2">
+        <button
+          onClick={() => onViewDetails(product)}
+          className="flex-grow py-2 px-3 bg-gray-200 text-gray-800 text-sm font-medium rounded-lg hover:bg-gray-300 transition duration-150"
+        >
+          Details
+        </button>
+        <button
+          onClick={() => onAddToCart(product)}
+          disabled={product.stock <= 0}
+          className={`flex-grow py-2 px-3 text-sm font-medium rounded-lg transition duration-150 ${
+            product.stock > 0
+              ? 'bg-green-600 text-white hover:bg-green-700 shadow-md hover:shadow-lg'
+              : 'bg-red-400 text-white cursor-not-allowed opacity-70'
+          }`}
+        >
+          {product.stock > 0 ? 'Add to Cart' : 'Out of Stock'}
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+// ... ProductDetails, CartModal components remain mostly the same ...
+// [Immersive content redacted for brevity.]
+
+const AuthModal = ({ isAuthOpen, closeAuth, authInstance, onLoginSuccess }) => {
+  if (!isAuthOpen) return null;
+
+  const [isRegister, setIsRegister] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setIsLoading(true);
+
+    try {
+      if (isRegister) {
+        // Register user
+        await createUserWithEmailAndPassword(authInstance, email, password);
+        onLoginSuccess();
+      } else {
+        // Sign in user
+        await signInWithEmailAndPassword(authInstance, email, password);
+        onLoginSuccess();
+      }
+      closeAuth();
+    } catch (err) {
+      console.error(err.code, err.message);
+      let friendlyError = 'An unexpected error occurred.';
+      if (err.code === 'auth/invalid-email') friendlyError = 'Invalid email address format.';
+      else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') friendlyError = 'Invalid credentials.';
+      else if (err.code === 'auth/weak-password') friendlyError = 'Password should be at least 6 characters.';
+      else if (err.code === 'auth/email-already-in-use') friendlyError = 'This email is already registered.';
+      
+      setError(friendlyError);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black bg-opacity-70 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm transform transition-all duration-300">
+        <div className="p-6 border-b flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-gray-800">{isRegister ? 'Register' : 'Sign In'} to Eshop</h2>
+          <button onClick={closeAuth} className="text-gray-500 hover:text-gray-900">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6">
+          {error && <p className="text-red-600 bg-red-100 p-2 rounded-lg mb-4 text-sm font-medium">{error}</p>}
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="email">Email</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+              required
+            />
+          </div>
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+              required
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={isLoading}
+            className={`w-full py-3 text-lg font-bold rounded-lg transition duration-150 ${
+              isLoading ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-md'
+            } text-white`}
+          >
+            {isLoading ? 'Processing...' : (isRegister ? 'Register & Sign In' : 'Sign In')}
+          </button>
+        </form>
+
+        <div className="p-4 border-t text-center bg-gray-50 rounded-b-xl">
+          <button 
+            onClick={() => { setIsRegister(!isRegister); setError(''); }}
+            className="text-sm text-blue-600 hover:underline"
+            type="button"
+          >
+            {isRegister ? 'Already have an account? Sign In' : 'New user? Create an account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// --- 3. Main Application Component ---
+
+const App = () => {
+  // Firebase State
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
+  // App State
+  const [products, setProducts] = useState({}); // {productId: product}
+  const [cart, setCart] = useState({}); // {productId: {product, quantity}}
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [view, setView] = useState('list'); // 'list' or 'details'
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [selectedCategory, setSelectedCategory] = useState('All');
+
+
+  // --- 4. Firebase Initialization and Authentication ---
+
+  useEffect(() => {
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const authInstance = getAuth(app);
+
+      setDb(firestore);
+      setAuth(authInstance);
+
+      // 1. Authenticate user
+      const authenticate = async () => {
+        // Attempt to use custom token first if available (standard platform requirement)
+        if (initialAuthToken) {
+          try {
+            await signInWithCustomToken(authInstance, initialAuthToken);
+            console.log("Signed in with custom token.");
+          } catch (error) {
+             console.error("Custom token sign-in failed. Falling back to anonymous or waiting for user login.", error);
+          }
+        }
+      };
+      authenticate();
+
+      // 2. Auth state listener (to get userId)
+      const unsubscribeAuth = onAuthStateChanged(authInstance, (user) => {
+        if (user) {
+          setUserId(user.uid);
+          setIsAuthModalOpen(false); // Close modal on successful sign-in
+        } else {
+          setUserId(null);
+          // Only automatically show the modal if initial loading is done and we couldn't sign in
+          if (isAuthReady) {
+             // Delay to prevent flickering if token is present
+             setTimeout(() => setIsAuthModalOpen(true), 100);
+          }
+        }
+        setIsAuthReady(true);
+        setIsLoading(false);
+      });
+
+      return () => unsubscribeAuth();
+    } catch (error) {
+      console.error("Error initializing Firebase:", error);
+      setIsLoading(false);
+    }
+  }, []); // Run only once for initialization
+
+
+  const handleLogout = useCallback(async () => {
+    if (auth) {
+      try {
+        await signOut(auth);
+        setCart({}); // Clear cart state on logout
+        setIsAuthModalOpen(true); // Open login prompt after logging out
+        setView('list'); // Go back to product list
+        console.log("User signed out.");
+      } catch (error) {
+        console.error("Error signing out:", error);
+      }
+    }
+  }, [auth]);
+
+
+  // --- 5. Firestore Synchronization Functions ---
+
+  // Function to save the current cart state to Firestore
+  const updateCartInDB = useCallback(async (newCart) => {
+    if (!db || !userId) return;
+
+    // Filter out zero/negative quantity items before saving
+    const itemsToSave = Object.fromEntries(
+      Object.entries(newCart).map(([productId, item]) => [productId, { quantity: item.quantity }])
+      .filter(([, item]) => item.quantity > 0)
+    );
+
+    const cartRef = COLLECTION_PATHS.cartDocument(userId);
+    const cartData = {
+      items: itemsToSave,
+      lastUpdated: new Date().toISOString(),
+      userId: userId,
+    };
+
+    try {
+      await setDoc(cartRef, cartData);
+      console.log("Cart saved successfully to Firestore.");
+    } catch (error) {
+      console.error("Error saving cart to Firestore:", error);
+    }
+  }, [db, userId]);
+
+
+  // --- 6. Data Listeners (Products and Cart) ---
+
+  // Listen for Product changes (Public Data) and ensure initial setup
+  useEffect(() => {
+    if (!db || !isAuthReady) return;
+
+    const productsRef = collection(db, COLLECTION_PATHS.products);
+
+    // Initial check: if no products exist, populate with sample data
+    getDocs(productsRef).then(snapshot => {
+        if (snapshot.empty) {
+            console.log("No products found. Populating with sample data.");
+            SAMPLE_PRODUCTS.forEach(product => {
+                const docRef = doc(db, COLLECTION_PATHS.products, product.id);
+                // Use setDoc(docRef, data) instead of addDoc for known product IDs
+                setDoc(docRef, product).catch(e => console.error("Error setting product:", e));
+            });
+        }
+    }).catch(e => console.error("Error checking for initial products:", e));
+
+
+    // Real-time listener for products
+    const unsubscribeProducts = onSnapshot(query(productsRef), (snapshot) => {
+      const newProducts = {};
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        newProducts[doc.id] = { id: doc.id, ...data };
+      });
+      setProducts(newProducts);
+      console.log("Products updated in real-time.");
+    }, (error) => {
+      console.error("Products Snapshot Error:", error);
+    });
+
+    return () => unsubscribeProducts();
+  }, [db, isAuthReady]);
+
+
+  // Listen for Cart changes (Private User Data)
+  useEffect(() => {
+    if (!db || !userId) return;
+
+    const cartRef = COLLECTION_PATHS.cartDocument(userId);
+
+    // Real-time listener for the user's cart document
+    const unsubscribeCart = onSnapshot(cartRef, (docSnapshot) => {
+      if (docSnapshot.exists()) {
+        const data = docSnapshot.data();
+        // The saved structure is `{items: {p1: {quantity: 1}, p2: {quantity: 2}}}`
+        const fetchedCart = data.items || {};
+
+        // Merge fetched cart data with current product information
+        const mergedCart = Object.entries(fetchedCart).reduce((acc, [productId, item]) => {
+            const product = products[productId];
+            if (product) {
+                 acc[productId] = {
+                    product: product,
+                    quantity: item.quantity,
+                 };
+            }
+            return acc;
+        }, {});
+
+        setCart(mergedCart);
+        console.log("Cart synchronized from Firestore.");
+      } else {
+        // Doc doesn't exist, create an empty one (This is handled by the first sign-in)
+        // If a user logs in for the first time, their cart will be empty, which is correct.
+      }
+    }, (error) => {
+      console.error("Cart Snapshot Error:", error);
+    });
+
+    return () => unsubscribeCart();
+  }, [db, userId, updateCartInDB, products]);
+
+
+  // --- 7. Cart & Navigation Logic ---
+
+  const handleAddToCart = useCallback((product) => {
+    if (!userId) {
+        setIsAuthModalOpen(true);
+        return;
+    }
+    setCart(prevCart => {
+      const existingItem = prevCart[product.id];
+      const newQuantity = existingItem ? existingItem.quantity + 1 : 1;
+
+      if (newQuantity > product.stock) {
+          // IMPORTANT: Replaced alert with console log and prevented state change
+          console.error(`Cannot add more items than available stock. Only ${product.stock} available.`);
+          return prevCart;
+      }
+
+      const newCart = {
+        ...prevCart,
+        [product.id]: {
+          product,
+          quantity: newQuantity,
+        },
+      };
+
+      updateCartInDB(newCart);
+      return newCart;
+    });
+  }, [updateCartInDB, userId]);
+
+  const handleUpdateQuantity = useCallback((productId, newQuantity) => {
+    if (!userId) return;
+    setCart(prevCart => {
+      const product = products[productId];
+
+      if (newQuantity <= 0) {
+        const newCart = { ...prevCart };
+        delete newCart[productId];
+        updateCartInDB(newCart);
+        return newCart;
+      }
+
+      if (newQuantity > product.stock) {
+          console.error(`Cannot set quantity to ${newQuantity}. Only ${product.stock} available.`);
+          return prevCart;
+      }
+
+      const newCart = {
+        ...prevCart,
+        [productId]: {
+          ...prevCart[productId],
+          quantity: newQuantity,
+        },
+      };
+
+      updateCartInDB(newCart);
+      return newCart;
+    });
+  }, [updateCartInDB, products, userId]);
+
+  const handleRemoveItem = useCallback((productId) => {
+    if (!userId) return;
+    setCart(prevCart => {
+      const newCart = { ...prevCart };
+      delete newCart[productId];
+      updateCartInDB(newCart);
+      return newCart;
+    });
+  }, [updateCartInDB, userId]);
+
+  const handleNavigateTo = (newView, product = null) => {
+    setView(newView);
+    setSelectedProduct(product);
+  };
+
+  // --- 8. Computed Values ---
+
+  const cartItemsArray = useMemo(() => Object.values(cart), [cart]);
+  const totalCartItems = useMemo(() => cartItemsArray.reduce((acc, item) => acc + item.quantity, 0), [cartItemsArray]);
+  const totalPrice = useMemo(() => cartItemsArray.reduce((acc, item) => acc + (item.product.price * item.quantity), 0), [cartItemsArray]);
+
+  const filteredProducts = useMemo(() => {
+    const productList = Object.values(products);
+    if (selectedCategory === 'All') {
+      return productList;
+    }
+    return productList.filter(p => p.category === selectedCategory);
+  }, [products, selectedCategory]);
+
+
+  // --- 9. Render Logic (UI) ---
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-50">
+        <div className="text-xl font-semibold text-blue-600">Loading Eshop Platform...</div>
+      </div>
+    );
+  }
+
+  let content;
+  if (view === 'details' && selectedProduct) {
+      content = <ProductDetails product={selectedProduct} onAddToCart={handleAddToCart} navigateTo={handleNavigateTo} />;
+  } else {
+      content = (
+        <div className="p-4 sm:p-6 max-w-4xl mx-auto">
+          <h2 className="text-3xl font-bold text-gray-800 mb-6 border-b pb-2">Product Catalog</h2>
+
+          {/* Category Filter Bar */}
+          <div className="flex flex-wrap gap-2 mb-6">
+            {ALL_CATEGORIES.map(category => (
+              <button
+                key={category}
+                onClick={() => setSelectedCategory(category)}
+                className={`py-2 px-4 rounded-full text-sm font-medium transition duration-150 ${
+                  selectedCategory === category
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'bg-gray-200 text-gray-700 hover:bg-blue-100 hover:text-blue-700'
+                }`}
+              >
+                {category}
+              </button>
+            ))}
+          </div>
+
+          {filteredProducts.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+              {filteredProducts.map(product => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  onViewDetails={p => handleNavigateTo('details', p)}
+                  onAddToCart={handleAddToCart}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="text-center text-gray-500 py-16">
+                No products found in the selected category.
+            </div>
+          )}
+        </div>
+      );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans">
+      <Header
+        totalCartItems={totalCartItems}
+        openCart={() => userId ? setIsCartOpen(true) : setIsAuthModalOpen(true)}
+        userId={userId}
+        navigateTo={handleNavigateTo}
+        isDetailsView={view === 'details'}
+        openAuthModal={() => setIsAuthModalOpen(true)}
+        handleLogout={handleLogout}
+      />
+
+      <main className="pb-16 pt-4">
+        {content}
+      </main>
+
+      <CartModal
+        isCartOpen={isCartOpen}
+        closeCart={() => setIsCartOpen(false)}
+        cartItems={cartItemsArray}
+        onUpdateQuantity={handleUpdateQuantity}
+        onRemoveItem={handleRemoveItem}
+        totalItems={totalCartItems}
+        totalPrice={totalPrice}
+      />
+
+      {auth && (
+        <AuthModal
+          isAuthOpen={isAuthModalOpen}
+          closeAuth={() => setIsAuthModalOpen(false)}
+          authInstance={auth}
+          onLoginSuccess={() => setIsAuthModalOpen(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+export default App;
+
